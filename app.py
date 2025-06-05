@@ -3,7 +3,7 @@ import pandas as pd
 import pulp
 import io
 
-st.set_page_config(page_title="Airline Network Optimizer", layout="centered")
+st.set_page_config(page_title="Airline Cargo Network Optimizer", layout="centered")
 st.title("✈️ Airline Cargo Network Optimizer (Excel Upload)")
 
 uploaded_file = st.file_uploader("📂 Upload your Excel file (.xlsx)", type="xlsx")
@@ -18,12 +18,13 @@ if uploaded_file:
 
         for _, row in df.iterrows():
             od = row['Sector']
-            cm = float(row['CM'])
+            cm_direct = float(row['CM'])
+            cm_leg1 = float(row.get('CM Leg1 Tp', 0) or 0)
+            cm_leg2 = float(row.get('CM leg2 Tp', 0) or 0)
             cargo_type = row['Cargo Type']
             market_size = float(row['Market Size'])
             cap = float(row['Capacity'])
 
-            # AI Share logic
             if cargo_type == 'Direct':
                 max_allocable = 0.5 * market_size
             else:
@@ -40,16 +41,23 @@ if uploaded_file:
             else:
                 legs = [od]
 
+            sum_legs_cm = cm_leg1 + cm_leg2
+            cm_to_use = cm_direct
+            if sum_legs_cm > cm_direct:
+                cm_to_use = sum_legs_cm
+
             all_od_paths[od] = {
                 'legs': legs,
-                'cm': cm,
+                'cm': cm_to_use,
+                'cm_direct': cm_direct,
+                'cm_leg1': cm_leg1,
+                'cm_leg2': cm_leg2,
                 'max_allocable': min(max_allocable, cap)
             }
 
             for leg in legs:
                 leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), cap)
 
-        # Optimization
         prob = pulp.LpProblem("NetworkCargoProfitMaximization", pulp.LpMaximize)
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
@@ -67,12 +75,12 @@ if uploaded_file:
             if v.varValue > 0:
                 od = v.name.replace("CargoTons_", "").replace("_", "-")
                 tons = v.varValue
-                cm = all_od_paths[od]['cm']
-                profit = tons * cm
+                props = all_od_paths[od]
+                profit = tons * props['cm']
                 od_summary.append({
                     'OD Pair': od,
                     'Cargo Tonnage': round(tons, 2),
-                    'CM (₹/ton)': cm,
+                    'CM (₹/ton)': props['cm'],
                     'Total Profit (₹)': round(profit, 2)
                 })
 
