@@ -52,7 +52,7 @@ if uploaded_file:
         # Optimization
         prob = pulp.LpProblem("NetworkCargoProfitMaximization", pulp.LpMaximize)
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
-        prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
+        prob += pulp.lpSum([x_od[od] * props['CM'] for od, props in all_od_paths.items()]), "TotalProfit"
 
         for leg, cap in leg_capacities.items():
             prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap
