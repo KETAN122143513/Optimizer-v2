@@ -18,46 +18,57 @@ if uploaded_file:
 
         for _, row in df.iterrows():
             od = row['Sector']
-            cm_direct = float(row['CM'])
-            cm_leg1 = float(row.get('CM Leg1 Tp', 0) or 0)
-            cm_leg2 = float(row.get('CM leg2 Tp', 0) or 0)
             cargo_type = row['Cargo Type']
             market_size = float(row['Market Size'])
             cap = float(row['Capacity'])
+            cm_od = float(row['CM'])
+            cm_leg1 = float(row['CM Leg1 Tp']) if pd.notna(row['CM Leg1 Tp']) else 0
+            cm_leg2 = float(row['CM Leg2 Tp']) if pd.notna(row['CM Leg2 Tp']) else 0
+            leg1 = row['Leg 1'] if pd.notna(row['Leg 1']) else None
+            leg2 = row['Leg 2'] if pd.notna(row['Leg 2']) else None
 
             if cargo_type == 'Direct':
                 max_allocable = 0.5 * market_size
             else:
                 max_allocable = 0.1 * market_size
 
-            leg1 = row['Leg 1'] if pd.notna(row['Leg 1']) else None
-            leg2 = row['Leg 2'] if pd.notna(row['Leg 2']) else None
-
-            legs = []
-            if leg1 and leg2:
-                legs = [leg1, leg2]
-            elif leg1:
-                legs = [leg1]
+            # Prefer leg-wise allocation if sum CM > OD CM
+            if cargo_type != 'Direct' and (cm_leg1 + cm_leg2) > cm_od:
+                if leg1:
+                    od_leg1 = f"{od}_LEG1"
+                    all_od_paths[od_leg1] = {
+                        'legs': [leg1],
+                        'cm': cm_leg1,
+                        'max_allocable': min(max_allocable, cap)
+                    }
+                    leg_capacities[leg1] = min(leg_capacities.get(leg1, float('inf')), cap)
+                if leg2:
+                    od_leg2 = f"{od}_LEG2"
+                    all_od_paths[od_leg2] = {
+                        'legs': [leg2],
+                        'cm': cm_leg2,
+                        'max_allocable': min(max_allocable, cap)
+                    }
+                    leg_capacities[leg2] = min(leg_capacities.get(leg2, float('inf')), cap)
             else:
-                legs = [od]
+                legs = []
+                if leg1 and leg2:
+                    legs = [leg1, leg2]
+                elif leg1:
+                    legs = [leg1]
+                else:
+                    legs = [od]
 
-            sum_legs_cm = cm_leg1 + cm_leg2
-            cm_to_use = cm_direct
-            if sum_legs_cm > cm_direct:
-                cm_to_use = sum_legs_cm
+                all_od_paths[od] = {
+                    'legs': legs,
+                    'cm': cm_od,
+                    'max_allocable': min(max_allocable, cap)
+                }
 
-            all_od_paths[od] = {
-                'legs': legs,
-                'cm': cm_to_use,
-                'cm_direct': cm_direct,
-                'cm_leg1': cm_leg1,
-                'cm_leg2': cm_leg2,
-                'max_allocable': min(max_allocable, cap)
-            }
+                for leg in legs:
+                    leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), cap)
 
-            for leg in legs:
-                leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), cap)
-
+        # Optimization
         prob = pulp.LpProblem("NetworkCargoProfitMaximization", pulp.LpMaximize)
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
@@ -75,12 +86,12 @@ if uploaded_file:
             if v.varValue > 0:
                 od = v.name.replace("CargoTons_", "").replace("_", "-")
                 tons = v.varValue
-                props = all_od_paths[od]
-                profit = tons * props['cm']
+                cm = all_od_paths[od]['cm']
+                profit = tons * cm
                 od_summary.append({
                     'OD Pair': od,
                     'Cargo Tonnage': round(tons, 2),
-                    'CM (₹/ton)': props['cm'],
+                    'CM (₹/ton)': cm,
                     'Total Profit (₹)': round(profit, 2)
                 })
 
