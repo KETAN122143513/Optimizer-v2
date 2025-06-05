@@ -10,74 +10,83 @@ uploaded_file = st.file_uploader("📂 Upload your Excel file (.xlsx)", type="xl
 
 if uploaded_file:
     try:
-        df = pd.read_excel(uploaded_file, sheet_name=0).replace('-', 0).fillna(0)
+        xls = pd.ExcelFile(uploaded_file)
+        direct_routes = xls.parse(sheet_name=0).replace("-", 0).fillna(0)
+        indirect_routes = xls.parse(sheet_name=1).replace("-", 0).fillna(0)
         st.success("✅ Excel file loaded successfully!")
 
         all_od_paths = {}
         leg_capacities = {}
+        leg_tp_caps = {}  # max TP cargo for any OD on a leg
+        leg_tp_master_caps = {}  # total TP cargo across all ODs per leg
+        od_leg_tp_caps = {}  # individual OD-leg constraint: min(10% leg cap, 12% AI Share)
 
-        for _, row in df.iterrows():
-            od = row['Sector']
-            cargo_type = row['Cargo Type']
-            market_size = float(row['Market Size'])
-            cap = float(row['Capacity'])
-            cm_od = float(row['CM']) if pd.notna(row['CM']) else 0
-            cm_leg1 = float(row['CM Leg1 TP']) if pd.notna(row['CM Leg1 TP']) else 0
-            cm_leg2 = float(row['CM Leg2 TP']) if pd.notna(row['CM Leg2 TP']) else 0
-            leg1 = row['Leg 1'] if pd.notna(row['Leg 1']) else None
-            leg2 = row['Leg 2'] if pd.notna(row['Leg 2']) else None
-
-            if cargo_type == 'Direct':
-                max_allocable = 0.5 * market_size
-            else:
-                max_allocable = 0.1 * market_size
-
-            # Prefer leg-wise allocation if sum CM > OD CM
-            if cargo_type != 'Direct' and (cm_leg1 + cm_leg2) > cm_od:
-                if leg1:
-                    od_leg1 = f"{od}-LEG1"
-                    all_od_paths[od_leg1] = {
-                        'legs': [leg1],
-                        'cm': cm_leg1,
-                        'max_allocable': min(max_allocable, cap)
-                    }
-                    leg_capacities[leg1] = min(leg_capacities.get(leg1, float('inf')), cap)
-                if leg2:
-                    od_leg2 = f"{od}-LEG2"
-                    all_od_paths[od_leg2] = {
-                        'legs': [leg2],
-                        'cm': cm_leg2,
-                        'max_allocable': min(max_allocable, cap)
-                    }
-                    leg_capacities[leg2] = min(leg_capacities.get(leg2, float('inf')), cap)
-            else:
-                legs = []
-                if leg1 and leg2:
-                    legs = [leg1, leg2]
-                elif leg1:
-                    legs = [leg1]
-                else:
-                    legs = [od]
+        # Process direct routes
+        for _, row in direct_routes.iterrows():
+            try:
+                od = row['O-D']
+                cm = float(row['CM'])
+                ai_share = float(row['AI Share']) if pd.notna(row['AI Share']) else 0
+                capacity = float(row['AI Cap']) if pd.notna(row['AI Cap']) else 0
+                tp_cap = float(row['TP Cap']) if pd.notna(row['TP Cap']) else 0
+                tp_master_cap = float(row['TP Master Cap']) if pd.notna(row['TP Master Cap']) else 0
 
                 all_od_paths[od] = {
+                    'legs': [od],
+                    'cm': cm,
+                    'max_allocable': min(ai_share, capacity),
+                    'type': 'Direct'
+                }
+                leg_capacities[od] = capacity
+                leg_tp_caps[od] = tp_cap
+                leg_tp_master_caps[od] = tp_master_cap
+            except:
+                continue
+
+        # Process indirect routes
+        for _, row in indirect_routes.iterrows():
+            try:
+                od = row['O-D']
+                cm = float(row['CM'])
+                ai_share = float(row['AI Share']) if pd.notna(row['AI Share']) else 0
+                max_allocable = ai_share
+                legs = [row['1st Leg O-D'], row['2nd Leg O-D']]
+                all_od_paths[od] = {
                     'legs': legs,
-                    'cm': cm_od,
-                    'max_allocable': min(max_allocable, cap)
+                    'cm': cm,
+                    'max_allocable': max_allocable,
+                    'type': 'Indirect'
                 }
 
-                for leg in legs:
-                    leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), cap)
+                for i, leg in enumerate(legs):
+                    cap_col = f'{i+1}st Leg AI Cap'
+                    leg_cap = float(row[cap_col]) if pd.notna(row[cap_col]) else 0
+                    leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), leg_cap)
+                    leg_tp_caps[leg] = 0.1 * leg_cap
+                    leg_tp_master_caps[leg] = 0.3 * leg_cap
+                    od_leg_tp_caps[(od, leg)] = min(0.1 * leg_cap, 0.12 * ai_share)
+            except:
+                continue
 
         # Optimization
         prob = pulp.LpProblem("NetworkCargoProfitMaximization", pulp.LpMaximize)
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
 
+        # Flight leg capacity constraint
         for leg, cap in leg_capacities.items():
             prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap
 
+        # OD max allocable constraint
         for od, props in all_od_paths.items():
             prob += x_od[od] <= props['max_allocable']
+
+        # TP constraints
+        for leg in leg_tp_caps:
+            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs'] and props['type'] == 'Indirect']) <= leg_tp_master_caps[leg]
+
+        for (od, leg), cap in od_leg_tp_caps.items():
+            prob += x_od[od] <= cap
 
         prob.solve()
 
@@ -114,7 +123,8 @@ if uploaded_file:
         df_leg_detail['Fill Priority Rank'] = None
 
         for leg, group in df_leg_detail.groupby("Flight Leg"):
-            sorted_group = group.sort_values(by=["Cargo Tonnage"], ascending=False)
+            sorted_group = group.copy()
+            sorted_group = sorted_group.sort_values(by=["Cargo Tonnage"], ascending=False)
             for rank, idx in enumerate(sorted_group.index, start=1):
                 df_leg_detail.loc[idx, 'Fill Priority Rank'] = rank
                 if len(group) == 1:
@@ -134,9 +144,12 @@ if uploaded_file:
             'Fill Priority Rank': ''
         }])
 
-        tab1, tab2, tab3, tab4 = st.tabs(["📂 Input Sheet", "📦 OD Allocation", "✈️ Leg Breakdown", "📊 Summary & Download"])
+        tab1, tab2, tab3, tab4 = st.tabs(["📂 Input Sheets", "📦 OD Allocation", "✈️ Leg Breakdown", "📊 Summary & Download"])
         with tab1:
-            st.dataframe(df)
+            st.subheader("Direct Routes (Input)")
+            st.dataframe(direct_routes)
+            st.subheader("Indirect Routes (Input)")
+            st.dataframe(indirect_routes)
         with tab2:
             st.dataframe(df_od_summary)
         with tab3:
@@ -147,14 +160,15 @@ if uploaded_file:
 
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            df.to_excel(writer, index=False, sheet_name="Raw_Input")
+            direct_routes.to_excel(writer, index=False, sheet_name="Direct_Routes_Input")
+            indirect_routes.to_excel(writer, index=False, sheet_name="Indirect_Routes_Input")
             df_od_summary.to_excel(writer, index=False, sheet_name="OD_Allocations")
             df_leg_detail.to_excel(writer, index=False, sheet_name="Leg_Breakdown")
             df_leg_summary.to_excel(writer, index=False, sheet_name="Leg_Summary")
             df_profit_note.to_excel(writer, index=False, sheet_name="Profit_Summary")
         output.seek(0)
 
-        st.download_button("📥 Download Excel Report", data=output, file_name="Updated_Airline_Cargo_Report.xlsx")
+        st.download_button("📥 Download Excel Report", data=output, file_name="Airline_Cargo_Report.xlsx")
 
     except Exception as e:
         st.error(f"❌ Error processing file: {e}")
