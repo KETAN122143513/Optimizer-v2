@@ -22,7 +22,7 @@ if uploaded_file:
             market_size = float(row['Market Size'])
             cap = float(row['Capacity'])
             cm_od = float(row['CM'])
-            cm_leg1 = float(row['CM Leg1 Tp']) if pd.notna(row['CM Leg1 TP']) else 0
+            cm_leg1 = float(row['CM Leg1 TP']) if pd.notna(row['CM Leg1 TP']) else 0
             cm_leg2 = float(row['CM Leg2 TP']) if pd.notna(row['CM Leg2 TP']) else 0
             leg1 = row['Leg 1'] if pd.notna(row['Leg 1']) else None
             leg2 = row['Leg 2'] if pd.notna(row['Leg 2']) else None
