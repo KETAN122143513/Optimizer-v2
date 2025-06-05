@@ -21,7 +21,7 @@ if uploaded_file:
             cargo_type = row['Cargo Type']
             market_size = float(row['Market Size'])
             cap = float(row['Capacity'])
-            cm_od = float(row['CM'])
+            cm_od = float(row['CM']) if pd.notna(row['CM']) else 0
             cm_leg1 = float(row['CM Leg1 TP']) if pd.notna(row['CM Leg1 TP']) else 0
             cm_leg2 = float(row['CM Leg2 TP']) if pd.notna(row['CM Leg2 TP']) else 0
             leg1 = row['Leg 1'] if pd.notna(row['Leg 1']) else None
@@ -35,7 +35,7 @@ if uploaded_file:
             # Prefer leg-wise allocation if sum CM > OD CM
             if cargo_type != 'Direct' and (cm_leg1 + cm_leg2) > cm_od:
                 if leg1:
-                    od_leg1 = f"{od}_LEG1"
+                    od_leg1 = f"{od}-LEG1"
                     all_od_paths[od_leg1] = {
                         'legs': [leg1],
                         'cm': cm_leg1,
@@ -43,7 +43,7 @@ if uploaded_file:
                     }
                     leg_capacities[leg1] = min(leg_capacities.get(leg1, float('inf')), cap)
                 if leg2:
-                    od_leg2 = f"{od}_LEG2"
+                    od_leg2 = f"{od}-LEG2"
                     all_od_paths[od_leg2] = {
                         'legs': [leg2],
                         'cm': cm_leg2,
