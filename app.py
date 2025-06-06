@@ -17,40 +17,40 @@ if uploaded_file:
 
         all_od_paths = {}
         leg_capacities = {}
-        leg_tp_caps = {}  # max TP cargo for any OD on a leg
-        leg_tp_master_caps = {}  # total TP cargo across all ODs per leg
-        od_leg_tp_caps = {}  # individual OD-leg constraint: min(10% leg cap, 12% AI Share)
+        leg_tp_caps = {}
+        leg_tp_master_caps = {}
+        od_leg_tp_caps = {}
 
         # Process direct routes
         for _, row in direct_routes.iterrows():
             try:
-                od = row['O-D']
+                od = row.get('O-D') or row.get('Sector')
+                if not od:
+                    continue
                 cm = float(row['CM'])
-                ai_share = float(row['AI Share']) if pd.notna(row['AI Share']) else 0
-                capacity = float(row['AI Cap']) if pd.notna(row['AI Cap']) else 0
-                tp_cap = float(row['TP Cap']) if pd.notna(row['TP Cap']) else 0
-                tp_master_cap = float(row['TP Master Cap']) if pd.notna(row['TP Master Cap']) else 0
-
+                ai_share = float(row['AI Share'])
+                ai_cap = float(row['AI Cap'])
                 all_od_paths[od] = {
                     'legs': [od],
                     'cm': cm,
-                    'max_allocable': min(ai_share, capacity),
+                    'max_allocable': min(ai_share, ai_cap),
                     'type': 'Direct'
                 }
-                leg_capacities[od] = capacity
-                leg_tp_caps[od] = tp_cap
-                leg_tp_master_caps[od] = tp_master_cap
+                leg_capacities[od] = ai_cap
             except:
                 continue
 
         # Process indirect routes
         for _, row in indirect_routes.iterrows():
             try:
-                od = row['O-D']
+                od = row.get('O-D') or row.get('Sector')
+                if not od:
+                    continue
                 cm = float(row['CM'])
-                ai_share = float(row['AI Share']) if pd.notna(row['AI Share']) else 0
-                max_allocable = ai_share
+                ai_share = float(row['AI Share'])
+                max_allocable = min(ai_share, row['TP Cap OD'])
                 legs = [row['1st Leg O-D'], row['2nd Leg O-D']]
+
                 all_od_paths[od] = {
                     'legs': legs,
                     'cm': cm,
@@ -59,12 +59,12 @@ if uploaded_file:
                 }
 
                 for i, leg in enumerate(legs):
-                    cap_col = f'{i+1}st Leg AI Cap'
-                    leg_cap = float(row[cap_col]) if pd.notna(row[cap_col]) else 0
+                    leg_tp_cap = row[f'TP Cap {i+1}']
+                    leg_tp_master_cap = row[f'TP Master Cap {i+1}']
+                    leg_cap = row[f'{i+1}st leg AI Share']
                     leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), leg_cap)
-                    leg_tp_caps[leg] = 0.1 * leg_cap
-                    leg_tp_master_caps[leg] = 0.3 * leg_cap
-                    od_leg_tp_caps[(od, leg)] = min(0.1 * leg_cap, 0.12 * ai_share)
+                    leg_tp_caps.setdefault(leg, []).append((od, leg_tp_cap))
+                    leg_tp_master_caps[leg] = leg_tp_master_cap
             except:
                 continue
 
@@ -73,20 +73,22 @@ if uploaded_file:
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
 
-        # Flight leg capacity constraint
+        # Leg capacity
         for leg, cap in leg_capacities.items():
             prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap
 
-        # OD max allocable constraint
+        # Max allocable per OD
         for od, props in all_od_paths.items():
             prob += x_od[od] <= props['max_allocable']
 
-        # TP constraints
-        for leg in leg_tp_caps:
-            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs'] and props['type'] == 'Indirect']) <= leg_tp_master_caps[leg]
+        # TP OD-Leg cap
+        for leg, tp_list in leg_tp_caps.items():
+            for od, cap in tp_list:
+                prob += x_od[od] <= cap
 
-        for (od, leg), cap in od_leg_tp_caps.items():
-            prob += x_od[od] <= cap
+        # TP Master cap
+        for leg, master_cap in leg_tp_master_caps.items():
+            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs'] and props['type'] == 'Indirect']) <= master_cap
 
         prob.solve()
 
@@ -123,8 +125,7 @@ if uploaded_file:
         df_leg_detail['Fill Priority Rank'] = None
 
         for leg, group in df_leg_detail.groupby("Flight Leg"):
-            sorted_group = group.copy()
-            sorted_group = sorted_group.sort_values(by=["Cargo Tonnage"], ascending=False)
+            sorted_group = group.sort_values(by=["Cargo Tonnage"], ascending=False)
             for rank, idx in enumerate(sorted_group.index, start=1):
                 df_leg_detail.loc[idx, 'Fill Priority Rank'] = rank
                 if len(group) == 1:
