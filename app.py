@@ -13,7 +13,10 @@ if uploaded_file:
         xls = pd.ExcelFile(uploaded_file)
         direct_routes = xls.parse(sheet_name=0).replace("-", 0).fillna(0)
         indirect_routes = xls.parse(sheet_name=1).replace("-", 0).fillna(0)
+        direct_routes.columns = direct_routes.columns.str.strip()
+        indirect_routes.columns = indirect_routes.columns.str.strip()
         st.success("✅ Excel file loaded successfully!")
+        
 
         all_od_paths = {}
         leg_capacities = {}
