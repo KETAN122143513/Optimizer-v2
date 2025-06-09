@@ -48,7 +48,7 @@ if uploaded_file:
                     continue
                 cm = float(row['CM'])
                 ai_share = float(row['AI Share'])
-                max_allocable = min(ai_share, row['TP Cap OD'])
+                max_allocable = ai_share
                 legs = [row['1st Leg O-D'], row['2nd Leg O-D']]
 
                 all_od_paths[od] = {
