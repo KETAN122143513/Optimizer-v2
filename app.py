@@ -16,10 +16,8 @@ if uploaded_file:
         st.success("✅ Excel file loaded successfully!")
 
         all_od_paths = {}
-        leg_capacities = {}
-        leg_tp_caps = {}
-        leg_tp_master_caps = {}
-        od_leg_tp_caps = {}
+        leg_capacities = {} # Overall capacity for a flight leg (AI Cap for direct, AI Share for indirect leg)
+        leg_tp_master_caps = {} # TP Master Cap for indirect legs
 
         # Process direct routes
         for _, row in direct_routes.iterrows():
@@ -30,14 +28,19 @@ if uploaded_file:
                 cm = float(row['CM'])
                 ai_share = float(row['AI Share'])
                 ai_cap = float(row['AI Cap'])
+                market_size = float(row['Market Size'])
+
                 all_od_paths[od] = {
                     'legs': [od],
                     'cm': cm,
-                    'max_allocable': min(ai_share, ai_cap),
+                    'ai_share': ai_share,
+                    'market_size': market_size,
                     'type': 'Direct'
                 }
+                # For direct routes, the leg's capacity is its AI Cap
                 leg_capacities[od] = ai_cap
-            except:
+            except Exception as e:
+                st.warning(f"Skipping direct route row due to error: {e} in row: {row.to_dict()}")
                 continue
 
         # Process indirect routes
@@ -47,49 +50,87 @@ if uploaded_file:
                 if not od:
                     continue
                 cm = float(row['CM'])
-                ai_share = float(row['AI Share'])
-                max_allocable = min(ai_share, row['TP Cap OD'])
-                legs = [row['1st Leg O-D'], row['2nd Leg O-D']]
+                ai_share = float(row['AI Share']) # This is the AI Share for the overall O-D
+                market_size = float(row['Market Size'])
+                
+                leg1_od = row['1st Leg O-D']
+                leg1_ai_share = float(row['1st Leg AI Share'])
+                leg1_ai_cap = float(row['1st Leg AI Cap']) # This is not used as a strict cap on the leg, rather the AI share of the leg
+                leg1_cm = float(row['1st Leg CM'])
+                leg1_tp_cap = float(row['TP Cap 1'])
+                leg1_tp_master_cap = float(row['TP Master Cap 1'])
+
+                leg2_od = row['2nd Leg O-D']
+                leg2_ai_share = float(row['2nd Leg AI Share'])
+                leg2_ai_cap = float(row['2nd Leg AI Cap']) # This is not used as a strict cap on the leg, rather the AI share of the leg
+                leg2_cm = float(row['2nd Leg CM'])
+                leg2_tp_cap = float(row['TP Cap 2'])
+                leg2_tp_master_cap = float(row['TP Master Cap 2'])
+
+                legs = [leg1_od, leg2_od]
+
+                # Determine the true max allocable for the O-D considering all caps
+                max_allocable_od = min(ai_share, leg1_tp_cap, leg2_tp_cap)
 
                 all_od_paths[od] = {
                     'legs': legs,
                     'cm': cm,
-                    'max_allocable': max_allocable,
-                    'type': 'Indirect'
+                    'ai_share': ai_share,
+                    'market_size': market_size,
+                    'type': 'Indirect',
+                    'leg1_tp_cap': leg1_tp_cap,
+                    'leg2_tp_cap': leg2_tp_cap,
+                    'max_allocable': max_allocable_od # This is the overall max allocable for the O-D
                 }
 
-                for i, leg in enumerate(legs):
-                    leg_tp_cap = row[f'TP Cap {i+1}']
-                    leg_tp_master_cap = row[f'TP Master Cap {i+1}']
-                    leg_cap = row[f'{i+1}st leg AI Share']
-                    leg_capacities[leg] = min(leg_capacities.get(leg, float('inf')), leg_cap)
-                    leg_tp_caps.setdefault(leg, []).append((od, leg_tp_cap))
-                    leg_tp_master_caps[leg] = leg_tp_master_cap
-            except:
+                # Update leg capacities for individual legs. For indirect, we use the AI Share of the leg.
+                # If a direct route shares a leg with an indirect, the AI Cap of the direct takes precedence for the leg.
+                # Here we are concerned with the capacity of the *leg itself*
+                leg_capacities[leg1_od] = min(leg_capacities.get(leg1_od, float('inf')), leg1_ai_share)
+                leg_capacities[leg2_od] = min(leg_capacities.get(leg2_od, float('inf')), leg2_ai_share)
+
+                # Store TP Master Caps for later use in constraints
+                leg_tp_master_caps[leg1_od] = leg1_tp_master_cap
+                leg_tp_master_caps[leg2_od] = leg2_tp_master_cap
+
+            except Exception as e:
+                st.warning(f"Skipping indirect route row due to error: {e} in row: {row.to_dict()}")
                 continue
+        
+        # Merge AI Cap for direct legs into leg_capacities if it's higher or unique
+        for od, props in all_od_paths.items():
+            if props['type'] == 'Direct':
+                leg_capacities[od] = min(leg_capacities.get(od, float('inf')), props.get('ai_cap', float('inf'))) # Ensuring direct AI Cap is considered
+
 
         # Optimization
         prob = pulp.LpProblem("NetworkCargoProfitMaximization", pulp.LpMaximize)
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
+
+        # Objective function: Maximize total profit
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
 
-        # Leg capacity
+        # Constraints
+
+        # 1. Overall leg capacity constraint (AI Cap for direct routes, AI Share for indirect legs)
         for leg, cap in leg_capacities.items():
-            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap
+            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap, f"Leg_Capacity_{leg}"
 
-        # Max allocable per OD
+        # 2. Max allocable per OD pair (based on AI Share for direct, and min of AI Share and both TP Caps for indirect)
         for od, props in all_od_paths.items():
-            prob += x_od[od] <= props['max_allocable']
+            if props['type'] == 'Direct':
+                prob += x_od[od] <= props['ai_share'], f"OD_Max_Allocable_{od}"
+            else: # Indirect routes
+                prob += x_od[od] <= props['max_allocable'], f"OD_Max_Allocable_{od}"
 
-        # TP OD-Leg cap
-        for leg, tp_list in leg_tp_caps.items():
-            for od, cap in tp_list:
-                prob += x_od[od] <= cap
 
-        # TP Master cap
+        # 3. TP Master Cap constraint for indirect legs
+        # This constraint states that the sum of all indirect cargo using a particular leg
+        # must not exceed the TP Master Cap for that leg.
         for leg, master_cap in leg_tp_master_caps.items():
-            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs'] and props['type'] == 'Indirect']) <= master_cap
-
+            prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs'] and props['type'] == 'Indirect']) <= master_cap, f"TP_Master_Cap_{leg}"
+        
+        # Solve the problem
         prob.solve()
 
         od_summary = []
@@ -125,13 +166,14 @@ if uploaded_file:
         df_leg_detail['Fill Priority Rank'] = None
 
         for leg, group in df_leg_detail.groupby("Flight Leg"):
+            # Sort by CM first, then Cargo Tonnage if CM is same (though CM is already captured by profit max)
             sorted_group = group.sort_values(by=["Cargo Tonnage"], ascending=False)
             for rank, idx in enumerate(sorted_group.index, start=1):
                 df_leg_detail.loc[idx, 'Fill Priority Rank'] = rank
                 if len(group) == 1:
                     df_leg_detail.loc[idx, 'Priority Type'] = "Only OD"
                 else:
-                    df_leg_detail.loc[idx, 'Priority Type'] = "Based on Cargo Tonnage"
+                    df_leg_detail.loc[idx, 'Priority Type'] = "Based on Cargo Tonnage" # The solver optimizes for CM already
 
         df_leg_summary = df_leg_detail.groupby('Flight Leg')['Cargo Tonnage'].sum().reset_index(name='Total Tonnage (Tons)')
         total_profit = pulp.value(prob.objective)
@@ -152,10 +194,13 @@ if uploaded_file:
             st.subheader("Indirect Routes (Input)")
             st.dataframe(indirect_routes)
         with tab2:
+            st.subheader("Optimal OD Allocations")
             st.dataframe(df_od_summary)
         with tab3:
+            st.subheader("Cargo Breakdown per Flight Leg")
             st.dataframe(df_leg_detail)
         with tab4:
+            st.subheader("Total Tonnage per Flight Leg")
             st.dataframe(df_leg_summary)
             st.markdown(f"### ✅ Total Network Profit: ₹ {round(total_profit, 2):,.2f}")
 
