@@ -13,17 +13,13 @@ if uploaded_file:
         xls = pd.ExcelFile(uploaded_file)
         direct_routes = xls.parse(sheet_name=0).replace("-", 0).fillna(0)
         indirect_routes = xls.parse(sheet_name=1).replace("-", 0).fillna(0)
-
-        # Normalize column names
-        direct_routes.columns = direct_routes.columns.str.strip()
-        indirect_routes.columns = indirect_routes.columns.str.strip()
-
         st.success("✅ Excel file loaded successfully!")
 
         all_od_paths = {}
         leg_capacities = {}
         leg_tp_caps = {}
         leg_tp_master_caps = {}
+        od_leg_tp_caps = {}
 
         # Process direct routes
         for _, row in direct_routes.iterrows():
@@ -52,7 +48,7 @@ if uploaded_file:
                     continue
                 cm = float(row['CM'])
                 ai_share = float(row['AI Share'])
-                max_allocable = ai_share
+                max_allocable = min(ai_share, row['TP Cap OD'])
                 legs = [row['1st Leg O-D'], row['2nd Leg O-D']]
 
                 all_od_paths[od] = {
