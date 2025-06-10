@@ -23,6 +23,8 @@ if uploaded_file:
         all_od_paths = {}
         leg_capacities = {}
         od_leg_caps = []
+        cargo_type_map = dict(zip(indirect_routes['O-D'], indirect_routes['Cargo Type']))
+        flight_type_map = dict(zip(direct_routes['O-D'], direct_routes.get('Region', '')))
 
         # Process direct routes
         for _, row in direct_routes.iterrows():
@@ -73,15 +75,12 @@ if uploaded_file:
         x_od = pulp.LpVariable.dicts("CargoTons", all_od_paths.keys(), lowBound=0, cat='Continuous')
         prob += pulp.lpSum([x_od[od] * props['cm'] for od, props in all_od_paths.items()]), "TotalProfit"
 
-        # Leg capacity
         for leg, cap in leg_capacities.items():
             prob += pulp.lpSum([x_od[od] for od, props in all_od_paths.items() if leg in props['legs']]) <= cap
 
-        # Max allocable per OD
         for od, props in all_od_paths.items():
             prob += x_od[od] <= props['max_allocable']
 
-        # Max OD Cargo per leg constraint
         for od, leg, cap in od_leg_caps:
             prob += x_od[od] <= cap
 
@@ -107,12 +106,18 @@ if uploaded_file:
         for od_row in df_od_summary.itertuples():
             od, tons, cm = od_row._1, od_row._2, od_row._3
             for leg in all_od_paths[od]['legs']:
+                type_label = "Direct" if od == leg else "Transit"
+                type2 = cargo_type_map.get(od, "Direct")
+                flight_type = flight_type_map.get(leg, "")
                 records.append({
                     'Flight Leg': leg,
                     'OD Contributor': od,
                     'OD CM (₹/ton)': cm,
                     'Cargo Tonnage': tons,
-                    'Revenue from Leg (₹)': tons * cm
+                    'Revenue from Leg (₹)': tons * cm,
+                    'Type': type_label,
+                    'Type 2': type2,
+                    'Flight Type': flight_type
                 })
 
         df_leg_detail = pd.DataFrame(records)
@@ -137,7 +142,10 @@ if uploaded_file:
             'Cargo Tonnage': '',
             'Revenue from Leg (₹)': round(total_profit, 2),
             'Priority Type': '',
-            'Fill Priority Rank': ''
+            'Fill Priority Rank': '',
+            'Type': '',
+            'Type 2': '',
+            'Flight Type': ''
         }])
 
         tab1, tab2, tab3, tab4 = st.tabs(["📂 Input Sheets", "📦 OD Allocation", "✈️ Leg Breakdown", "📊 Summary & Download"])
