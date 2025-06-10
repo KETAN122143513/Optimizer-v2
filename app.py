@@ -24,7 +24,7 @@ if uploaded_file:
         leg_capacities = {}
         od_leg_caps = []
         cargo_type_map = dict(zip(indirect_routes['O-D'], indirect_routes['Cargo Type']))
-        flight_type_map = dict(zip(direct_routes['O-D'], direct_routes['Region']))
+        flight_type_map = dict(zip(direct_routes['O-D'], direct_routes.get('Region','')))
 
         # Process direct routes
         for _, row in direct_routes.iterrows():
