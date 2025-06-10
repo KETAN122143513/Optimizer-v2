@@ -57,7 +57,7 @@ if uploaded_file:
                 all_od_paths[od] = {
                     'legs': legs,
                     'cm': cm,
-                    'max_allocable': min(ai_share, max_allocable),
+                    'max_allocable': max_allocable,
                     'type': 'Indirect'
                 }
 
